@@ -412,9 +412,8 @@ lws_http_serve(struct lws *wsi, char *uri, const char *origin,
 		const struct lws_protocols *pp = lws_vhost_name_to_protocol(
 							wsi->vhost, m->protocol);
 
-		wsi->protocol = pp;
-		if (lws_ensure_user_space(wsi))
-			return -1;
+		if (lws_bind_protocol(wsi, pp))
+			return 1;
 		args.p = (char *)p;
 		args.max_len = end - p;
 		if (pp->callback(wsi, LWS_CALLBACK_ADD_HEADERS,
@@ -702,11 +701,8 @@ lws_http_action(struct lws *wsi)
 				return 1;
 			}
 
-			wsi->protocol = pp;
-			if (lws_ensure_user_space(wsi)) {
-				lwsl_err("Unable to allocate user space\n");
+			if (lws_bind_protocol(wsi, pp))
 				return 1;
-			}
 		}
 		lwsl_info("wsi %s protocol '%s'\n", uri_ptr, wsi->protocol->name);
 
@@ -791,16 +787,8 @@ lws_http_action(struct lws *wsi)
 				for (n = 0; n < (unsigned int)wsi->vhost->count_protocols; n++)
 					if (!strcmp(wsi->vhost->protocols[n].name,
 						   hit->origin)) {
-
-						if (wsi->protocol != &wsi->vhost->protocols[n])
-							if (!wsi->user_space_externally_allocated)
-								lws_free_set_NULL(wsi->user_space);
-						wsi->protocol = &wsi->vhost->protocols[n];
-						if (lws_ensure_user_space(wsi)) {
-							lwsl_err("Unable to allocate user space\n");
-
+						if (lws_bind_protocol(wsi, &wsi->vhost->protocols[n]))
 							return 1;
-						}
 						break;
 					}
 
@@ -877,11 +865,8 @@ lws_http_action(struct lws *wsi)
 				const struct lws_protocols *pp = lws_vhost_name_to_protocol(
 						wsi->vhost, hit->protocol);
 
-				wsi->protocol = pp;
-				if (lws_ensure_user_space(wsi)) {
-					lwsl_err("Unable to allocate user space\n");
+				if (lws_bind_protocol(wsi, pp))
 					return 1;
-				}
 
 				n = pp->callback(wsi, LWS_CALLBACK_HTTP,
 						 wsi->user_space,
@@ -896,10 +881,8 @@ lws_http_action(struct lws *wsi)
 
 		lwsl_notice("no hit\n");
 
-		if (wsi->protocol != &wsi->vhost->protocols[0])
-			if (!wsi->user_space_externally_allocated)
-				lws_free_set_NULL(wsi->user_space);
-		wsi->protocol = &wsi->vhost->protocols[0];
+		if (lws_bind_protocol(wsi, &wsi->vhost->protocols[0]))
+			return 1;
 
 		n = wsi->protocol->callback(wsi, LWS_CALLBACK_HTTP,
 				    wsi->user_space, uri_ptr, uri_len);
@@ -935,6 +918,32 @@ bail_nuke_ah:
 	lws_header_table_detach(wsi, 1);
 
 	return 1;
+}
+
+int
+lws_bind_protocol(struct lws *wsi, const struct lws_protocols *p)
+{
+	if (wsi->protocol == p)
+		return 0;
+
+	if (wsi->protocol)
+		wsi->protocol->callback(wsi, LWS_CALLBACK_HTTP_DROP_PROTOCOL,
+					wsi->user_space, NULL, 0);
+	if (!wsi->user_space_externally_allocated)
+		lws_free_set_NULL(wsi->user_space);
+
+	wsi->protocol = p;
+	if (!p)
+		return 0;
+
+	if (lws_ensure_user_space(wsi))
+		return 1;
+
+	if (wsi->protocol->callback(wsi, LWS_CALLBACK_HTTP_BIND_PROTOCOL,
+				    wsi->user_space, NULL, 0))
+		return 1;
+
+	return 0;
 }
 
 
@@ -1391,13 +1400,8 @@ lws_http_transaction_completed(struct lws *wsi)
 		return 1;
 	}
 
-	n = wsi->protocol->callback(wsi, LWS_CALLBACK_HTTP_DROP_PROTOCOL,
-				    wsi->user_space, NULL, 0);
-
-	if (!wsi->user_space_externally_allocated)
-		lws_free_set_NULL(wsi->user_space);
-
-	wsi->protocol = &wsi->vhost->protocols[0];
+	if (lws_bind_protocol(wsi, &wsi->vhost->protocols[0]))
+		return 1;
 
 	/* otherwise set ourselves up ready to go again */
 	wsi->state = LWSS_HTTP;
